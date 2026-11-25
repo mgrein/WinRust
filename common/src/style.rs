@@ -21,6 +21,9 @@ pub enum Style {
 
 pub const ALL: [Style; 9] = [Style::Normal, Style::Terminal, Style::Dock, Style::Tiling, Style::Road, Style::Ruby, Style::Win98, Style::Win7, Style::Win11];
 
+/// The look of a fresh install and of "Reset everything to defaults".
+pub const DEFAULT: Style = Style::Win11;
+
 impl Style {
     pub fn name(self) -> &'static str {
         match self {
@@ -35,9 +38,9 @@ impl Style {
             Style::Win11 => "win11",
         }
     }
-    /// Unknown or empty text (no file yet, a hand edit) is the normal style.
+    /// Unknown or empty text (no file yet, a hand edit) is the default style.
     pub fn parse(s: &str) -> Style {
-        ALL.into_iter().find(|v| v.name().eq_ignore_ascii_case(s.trim())).unwrap_or(Style::Normal)
+        ALL.into_iter().find(|v| v.name().eq_ignore_ascii_case(s.trim())).unwrap_or(DEFAULT)
     }
     /// Square corners everywhere.
     // only the terminal keeps the monospace, square look; tiling uses the same sans and rounded shapes as the rest
@@ -449,7 +452,7 @@ pub fn reset_all() {
     set_autohide(false);
     set_align_left(false);
     set_alttab_per_monitor(false);
-    Theme { name: String::new(), style: Style::Normal, colors: [u32::MAX; 7], opacity: 100 }.apply();
+    Theme { name: String::new(), style: DEFAULT, colors: [u32::MAX; 7], opacity: 100 }.apply();
 }
 
 /// A raised surface (a card, a tile): pure white on the light style, a step up from the background on the dark ones.
@@ -579,13 +582,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn names_round_trip_and_junk_is_normal() {
+    fn names_round_trip_and_junk_is_the_default() {
         for s in ALL {
             assert_eq!(Style::parse(s.name()), s);
         }
         assert_eq!(Style::parse(" Tiling\r\n"), Style::Tiling);
-        assert_eq!(Style::parse(""), Style::Normal);
-        assert_eq!(Style::parse("neon"), Style::Normal);
+        assert_eq!(Style::parse(""), Style::Win11);
+        assert_eq!(Style::parse("neon"), Style::Win11);
         assert_eq!(PALS.len(), ALL.len());
     }
 
