@@ -150,9 +150,19 @@ pub(crate) fn bar_idx() -> Vec<usize> {
     let shown = SHOWN.with_borrow(|s| s.clone());
     TAPPS.with_borrow(|t| t.iter().enumerate().filter(|(_, x)| !x.hidden && shown.as_ref().is_some_and(|s| s.contains(&x.key))).map(|(i, _)| i).collect())
 }
-/// Bar slots of the tray: the chevron plus the icons kept on the bar.
+/// Bar slots of the tray: the chevron (only when the flyout has something in it, like Windows 11) plus the icons kept on the bar.
 pub(crate) fn tray_count() -> usize {
-    bar_idx().len() + 1
+    bar_idx().len() + chev()
+}
+
+/// 1 when the chevron is on the bar, 0 when every icon already is.
+pub(crate) fn chev() -> usize {
+    (!over_idx().is_empty()) as usize
+}
+
+/// Bar position (in 24 px slots from the tray's left end) of tray slot `slot`: 0 is the chevron, 1.. the icons.
+pub(crate) fn tray_pos(slot: usize) -> i32 {
+    (slot + chev()) as i32 - 1
 }
 
 /// Indices into TAPPS of the icons only the flyout shows (everything not kept on the bar).

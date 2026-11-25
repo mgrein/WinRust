@@ -16,9 +16,10 @@ pub enum Style {
     Ruby,     // deep ruby, a smooth glossy gradient
     Win98,    // BETA: classic grey, navy accent, square corners, Tahoma
     Win7,     // BETA: Aero-like glass blue
+    Win11,    // the stock Windows 11 dark taskbar: Start first, centered, flat, no gear
 }
 
-pub const ALL: [Style; 8] = [Style::Normal, Style::Terminal, Style::Dock, Style::Tiling, Style::Road, Style::Ruby, Style::Win98, Style::Win7];
+pub const ALL: [Style; 9] = [Style::Normal, Style::Terminal, Style::Dock, Style::Tiling, Style::Road, Style::Ruby, Style::Win98, Style::Win7, Style::Win11];
 
 impl Style {
     pub fn name(self) -> &'static str {
@@ -31,6 +32,7 @@ impl Style {
             Style::Ruby => "ruby",
             Style::Win98 => "win98",
             Style::Win7 => "win7",
+            Style::Win11 => "win11",
         }
     }
     /// Unknown or empty text (no file yet, a hand edit) is the normal style.
@@ -240,7 +242,7 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 
 /// In the order of `ALL`. Neutral, low-contrast surfaces and one restrained accent (the look of macOS / modern fintech apps).
-pub const PALS: [Pal; 8] = [
+pub const PALS: [Pal; 9] = [
     // normal: graphite with the Apple system blue
     Pal { bg: rgb(22, 22, 24), line: rgb(46, 46, 50), hover: rgb(36, 36, 40), active: rgb(44, 44, 49), accent: rgb(10, 132, 255), text: rgb(245, 245, 247), dim: rgb(142, 142, 147) },
     // terminal: green on black
@@ -257,6 +259,8 @@ pub const PALS: [Pal; 8] = [
     Pal { bg: rgb(192, 192, 192), line: rgb(128, 128, 128), hover: rgb(212, 208, 200), active: rgb(160, 160, 160), accent: rgb(0, 0, 128), text: rgb(0, 0, 0), dim: rgb(64, 64, 64) },
     // win7: Aero glass blue
     Pal { bg: rgb(31, 58, 96), line: rgb(72, 108, 154), hover: rgb(58, 92, 138), active: rgb(74, 112, 160), accent: rgb(120, 190, 255), text: rgb(255, 255, 255), dim: rgb(176, 198, 226) },
+    // win11: the dark taskbar's #202020 base, white 6 % / 9 % hover and focus plates, the default dark-mode accent
+    Pal { bg: rgb(32, 32, 32), line: rgb(48, 48, 48), hover: rgb(45, 45, 45), active: rgb(52, 52, 52), accent: rgb(76, 194, 255), text: rgb(255, 255, 255), dim: rgb(157, 157, 157) },
 ];
 
 /// Status colours shared by every style (Apple's dark-mode system green, yellow, red).

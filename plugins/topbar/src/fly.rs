@@ -37,6 +37,19 @@ enum Act {
     Keyboard,   // the on-screen keyboard button in the Start search field
 }
 
+thread_local! {
+    /// The monitor of the bar that was clicked last, when it is a second monitor's bar (None: the main bar).
+    pub(crate) static ORIGIN: Cell<Option<RECT>> = const { Cell::new(None) };
+}
+
+/// Where flyouts open: (x offset, y offset from the main bar's place, monitor width) of the clicked bar's monitor.
+unsafe fn origin() -> (i32, i32, i32) {
+    match ORIGIN.get() {
+        Some(m) if !vert() => (m.left, m.bottom - GetSystemMetrics(SM_CYSCREEN) + dock_gap(), m.right - m.left),
+        _ => (0, 0, GetSystemMetrics(SM_CXSCREEN)),
+    }
+}
+
 /// The touch keyboard (TabTip), else the classic on-screen keyboard. Windows opens it by itself only for the Explorer shell.
 fn touch_keyboard() {
     let tip = std::env::var_os("CommonProgramFiles").map(|p| std::path::PathBuf::from(p).join(r"microsoft shared\ink\TabTip.exe"));
@@ -843,6 +856,7 @@ fn menu_rows() -> (Vec<(i32, i32)>, i32) {
 pub fn context_menu(x: i32) {
     let pu = crate::purge_installed();
     let mut items = vec![
+        MItem::new(t!("Параметры панели задач", "Taskbar settings", ja: "タスク バーの設定", pt: "Configurações da barra de tarefas", zh: "任务栏设置")).sep(),
         MItem::new(t!("Параметры Windows", "Windows Settings", ja: "Windows の設定", pt: "Configurações do Windows", zh: "Windows 设置")).hint("Win+I"),
         MItem::new(t!("Персонализация", "Personalization", ja: "個人用設定", pt: "Personalização", zh: "个性化")),
         MItem::new(t!("Диспетчер задач", "Task Manager", ja: "タスク マネージャー", pt: "Gerenciador de Tarefas", zh: "任务管理器")).hint("Ctrl+Shift+Esc").sep(),
@@ -850,16 +864,17 @@ pub fn context_menu(x: i32) {
         MItem::new(t!("Закрыть панель", "Close the bar", ja: "バーを閉じる", pt: "Fechar a barra", zh: "关闭任务栏")).danger().sep(),
     ];
     if pu {
-        items.insert(4, MItem::new(t!("Удалить мусор Windows (необратимо)", "Remove Windows junk (irreversible)", ja: "Windows の不要なものを削除 (元に戻せません)", pt: "Remover lixo do Windows (irreversível)", zh: "删除 Windows 垃圾文件（不可恢复）")).danger());
+        items.insert(5, MItem::new(t!("Удалить мусор Windows (необратимо)", "Remove Windows junk (irreversible)", ja: "Windows の不要なものを削除 (元に戻せません)", pt: "Remover lixo do Windows (irreversível)", zh: "删除 Windows 垃圾文件（不可恢复）")).danger());
     }
     menu(x, None, items, move |i| unsafe {
-        let i = if pu && i == 4 { 99 } else { i };
+        let i = if pu && i == 5 { 99 } else { i };
         match i {
-            0 => open(&wide("ms-settings:")),
-            1 => open(&wide("ms-settings:personalization")),
+            0 => crate::settings::style_menu(),
+            1 => open(&wide("ms-settings:")),
+            2 => open(&wide("ms-settings:personalization")),
             // with rtaskmgr-win32 installed this is our task manager; a full path because explorer.exe does not search PATH
-            2 => open(&wide(&format!(r"{}\System32\taskmgr.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())))),
-            3 => open_cleaner(),
+            3 => open(&wide(&format!(r"{}\System32\taskmgr.exe", std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())))),
+            4 => open_cleaner(),
             99 => crate::open_purge(),
             _ => _ = PostMessageW(FindWindowW(wide("topbar").as_ptr(), null()), WM_CLOSE, 0, 0), // quits the bar, brings the Windows taskbar back
         }
@@ -972,14 +987,14 @@ pub fn toggle(k: Kind) {
             _ => {}
         }
         let (w, h) = (sc(size(k).0), sc(size(k).1));
-        let sw = GetSystemMetrics(SM_CXSCREEN);
-        let x = if vert() { side_x(w) } else { match k {
+        let (ox, oy, sw) = origin();
+        let x = if vert() { side_x(w) } else { ox + match k {
             Kind::Start => (sw - w) / 2,
             Kind::Menu => MENU_X.get().min(sw - w - sc(8)).max(sc(8)),
             _ => sw - w - sc(8),
         } };
         let class = wide("topbar_fly");
-        let fy = if vert() && k == Kind::Menu { (MENU_X.get() - h / 2).clamp(sc(8), GetSystemMetrics(SM_CYSCREEN) - h - sc(8)) } else { pop_y(h) }; // above the bar (below it at the top of the screen)
+        let fy = if vert() && k == Kind::Menu { (MENU_X.get() - h / 2).clamp(sc(8), GetSystemMetrics(SM_CYSCREEN) - h - sc(8)) } else { pop_y(h) + oy }; // above the bar (below it at the top of the screen)
         let hw = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED, class.as_ptr(), null(), WS_POPUP, x, fy + sc(14), w, h, null_mut(), null_mut(), GetModuleHandleW(null()), null());
         SetLayeredWindowAttributes(hw, 0, 0, LWA_ALPHA); // starts invisible, anim_step fades it in
         if k == Kind::Start {
@@ -1802,7 +1817,7 @@ unsafe extern "system" fn proc(hw: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LR
                 let (w, h) = (sc(size(k).0), sc(size(k).1));
                 // the panel hangs above the bar: keep its bottom edge where it is and grow / shrink upward
                 let (x, _) = FIN.get();
-                let y = pop_y(h);
+                let y = pop_y(h) + origin().1;
                 FIN.set((x, y));
                 SetWindowPos(hw, null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
                 SetWindowRgn(hw, CreateRoundRectRgn(0, 0, w + 1, h + 1, rr(16), rr(16)), 1);

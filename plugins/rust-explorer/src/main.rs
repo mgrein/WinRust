@@ -12,9 +12,9 @@
 // drops always land in the current folder (not on a folder row), tabs remember only the folder (no selection/scroll).
 // upgrade: each of those one at a time; then register as the folder-open handler.
 // rust-explorer --desktop  - the desktop for rs-shell: borderless bottom-most color-keyed window with the Desktop folders
-//   (user + public) as big icons over the wallpaper it paints itself (without explorer nothing else does): reads the BMP
-//   that rs-shell converts into %LOCALAPPDATA%\rs-shell\wallpaper.bmp, "fill" style, scaled once at start.
-//   shortcuts: wallpaper is loaded once (changing it needs a restart), icon labels are always white, no background menu /
+//   (user + public) as big icons over the wallpaper it paints itself (without explorer nothing else does): the picture
+//   Windows is set to (any format, decoded by GDI+) with its fill / fit / stretch / center style, reloaded when it changes.
+//   shortcuts: tile and span show as fill, icon labels are always white, no background menu /
 //   drag-to-position / auto-arrange, items from the public desktop can't be renamed.
 #![windows_subsystem = "windows"]
 use std::{cell::RefCell, env, fs, os::windows::fs::MetadataExt, path::{Path, PathBuf}, ptr, sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed}};
@@ -40,11 +40,22 @@ fn place_desk_list(list: HWND) {
     let (sw, sh) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
     unsafe { MoveWindow(list, -vx, -vy + desk_top(), sw, (sh - desk_top() - desk_bottom()).max(0), 1) };
 }
-/// Renders the wallpaper for the current monitor layout (at start and when monitors change), freeing the old one.
+thread_local! { static WALL_KEY: RefCell<Option<(PathBuf, Option<std::time::SystemTime>, wall::Fit)>> = const { RefCell::new(None) }; } // what WALL was made from
+/// Renders the wallpaper for the current monitor layout (at start, when monitors change, when the wallpaper changes),
+/// freeing the old one.
 fn reload_wall() {
     let (vx, vy, cw, ch) = virt();
+    WALL_KEY.set(wall::key());
     let old = WALL.replace((wall::load(vx, vy, cw, ch), cw, ch)).0;
     if old != 0 { unsafe { windows_sys::Win32::Graphics::Gdi::DeleteObject(old as _) }; }
+}
+/// A new wallpaper (another picture, the same file rewritten, another fit) is painted at once, icons included.
+fn refresh_wall_if_changed(h: HWND) {
+    if WALL_KEY.with_borrow(|k| *k == wall::key()) { return; }
+    reload_wall();
+    use windows_sys::Win32::Graphics::Gdi::{RDW_ALLCHILDREN, RDW_ERASE, RDW_INVALIDATE, RedrawWindow};
+    unsafe { RedrawWindow(h, ptr::null(), ptr::null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN) };
+    desk::redraw_workerw();
 }
 /// Where the file manager window was when it last closed: %APPDATA%\rust-explorer\window.txt, `max|normal left top right bottom`
 /// (the restored rectangle, so un-maximizing goes back to the size it had).
@@ -800,6 +811,7 @@ fn search_focus() {
 
 /// Wallpaper for the desktop window.
 mod wall {
+    use std::path::PathBuf;
     use windows_sys::Win32::{Foundation::RECT, Graphics::Gdi::*, UI::WindowsAndMessaging::{IMAGE_BITMAP, LR_LOADFROMFILE, LoadImageW}};
 
     /// The part of a bw x bh picture that "fill" shows on a cw x ch screen: centered, cropped to the screen's aspect.
@@ -820,13 +832,84 @@ mod wall {
         v.iter().map(|r| RECT { left: r.left - vx, top: r.top - vy, right: r.right - vx, bottom: r.bottom - vy }).collect()
     }
 
-    /// The BMP for the whole virtual screen (vx, vy, cw x ch): scaled with "fill" onto each monitor on its own, so a second
-    /// monitor of another size or aspect gets a whole picture too. 0 = no wallpaper file.
+    fn reg_str(name: &str) -> Option<String> {
+        use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW};
+        let wide = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
+        let mut buf = vec![0u16; 1024];
+        let mut len = (buf.len() * 2) as u32;
+        let r = unsafe { RegGetValueW(HKEY_CURRENT_USER, wide(r"Control Panel\Desktop").as_ptr(), wide(name).as_ptr(), RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ, std::ptr::null_mut(), buf.as_mut_ptr().cast(), &mut len) };
+        if r != 0 { return None; }
+        buf.truncate((len as usize / 2).saturating_sub(1));
+        Some(String::from_utf16_lossy(&buf)).filter(|s| !s.trim().is_empty())
+    }
+
+    /// The picture Windows is set to show: the WallPaper value, else Explorer's decoded copy (Spotlight, slideshow, a moved
+    /// source), else the BMP rs-shell made at logon.
+    fn source() -> Option<PathBuf> {
+        let env = |v: &str| std::env::var_os(v).map(PathBuf::from);
+        reg_str("WallPaper").map(PathBuf::from).into_iter()
+            .chain(env("APPDATA").map(|a| a.join(r"Microsoft\Windows\Themes\TranscodedWallpaper")))
+            .chain(env("LOCALAPPDATA").map(|b| b.join(r"rs-shell\wallpaper.bmp")))
+            .find(|p| p.is_file())
+    }
+
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub enum Fit { Fill, Fit, Stretch, Center }
+
+    /// HKCU\Control Panel\Desktop\WallpaperStyle as Settings writes it (tile and span show as fill).
+    fn fit() -> Fit {
+        match reg_str("WallpaperStyle").and_then(|s| s.trim().parse::<u32>().ok()) {
+            Some(6) => Fit::Fit,
+            Some(2) => Fit::Stretch,
+            Some(0) if reg_str("TileWallpaper").is_none_or(|t| t.trim() != "1") => Fit::Center,
+            _ => Fit::Fill,
+        }
+    }
+
+    /// What the painted wallpaper depends on: the file, when it last changed, and the fit. A new value means reload.
+    pub fn key() -> Option<(PathBuf, Option<std::time::SystemTime>, Fit)> {
+        let p = source()?;
+        let t = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        Some((p, t, fit()))
+    }
+
+    /// Where a bw x bh picture lands on a mw x mh monitor, and which part of it: (dst x, y, w, h), (src x, y, w, h).
+    pub fn place(f: Fit, bw: i32, bh: i32, mw: i32, mh: i32) -> ((i32, i32, i32, i32), (i32, i32, i32, i32)) {
+        match f {
+            Fit::Fill => ((0, 0, mw, mh), fill_src(bw, bh, mw, mh)),
+            Fit::Stretch => ((0, 0, mw, mh), (0, 0, bw, bh)),
+            Fit::Fit => {
+                let (w, h) = if bw as i64 * mh as i64 > bh as i64 * mw as i64 { (mw, (bh as i64 * mw as i64 / bw.max(1) as i64) as i32) } else { ((bw as i64 * mh as i64 / bh.max(1) as i64) as i32, mh) };
+                (((mw - w) / 2, (mh - h) / 2, w, h), (0, 0, bw, bh))
+            }
+            Fit::Center => {
+                let (w, h) = (bw.min(mw), bh.min(mh));
+                (((mw - w) / 2, (mh - h) / 2, w, h), ((bw - w) / 2, (bh - h) / 2, w, h))
+            }
+        }
+    }
+
+    /// The picture as a bitmap: any format GDI+ decodes (JPEG, PNG, BMP...), else a BMP through LoadImage.
+    unsafe fn decode(path: &std::path::Path) -> HBITMAP {
+        use windows_sys::Win32::Graphics::GdiPlus::{GdipCreateBitmapFromFile, GdipCreateHBITMAPFromBitmap, GdipDisposeImage};
+        let wp: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain([0]).collect();
+        let mut bmp = std::ptr::null_mut();
+        if unsafe { GdipCreateBitmapFromFile(wp.as_ptr(), &mut bmp) } == 0 && !bmp.is_null() {
+            let mut hb: HBITMAP = std::ptr::null_mut();
+            let ok = unsafe { GdipCreateHBITMAPFromBitmap(bmp, &mut hb, 0xFF00_0000) } == 0;
+            unsafe { GdipDisposeImage(bmp as _) }; // closes the file: Settings may write it again
+            if ok && !hb.is_null() { return hb; }
+        }
+        unsafe { LoadImageW(std::ptr::null_mut(), wp.as_ptr(), IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE) }
+    }
+
+    /// The wallpaper for the whole virtual screen (vx, vy, cw x ch), laid out on each monitor on its own, so a second
+    /// monitor of another size or aspect gets a whole picture too. 0 = no wallpaper.
     pub fn load(vx: i32, vy: i32, cw: i32, ch: i32) -> isize {
-        let Ok(base) = std::env::var("LOCALAPPDATA") else { return 0 };
-        let path: Vec<u16> = format!(r"{base}\rs-shell\wallpaper.bmp").encode_utf16().chain([0]).collect();
+        let Some(path) = source() else { return 0 };
+        let f = fit();
         unsafe {
-            let src = LoadImageW(std::ptr::null_mut(), path.as_ptr(), IMAGE_BITMAP, 0, 0, LR_LOADFROMFILE);
+            let src = decode(&path);
             if src.is_null() { return 0; }
             let mut bm: BITMAP = std::mem::zeroed();
             GetObjectW(src, size_of::<BITMAP>() as i32, &mut bm as *mut _ as _);
@@ -840,8 +923,8 @@ mod wall {
             if mons.is_empty() { mons.push(RECT { left: 0, top: 0, right: cw, bottom: ch }); }
             for m in mons {
                 let (mw, mh) = (m.right - m.left, m.bottom - m.top);
-                let (sx, sy, sw, sh) = fill_src(bm.bmWidth, bm.bmHeight, mw, mh);
-                StretchBlt(ddc, m.left, m.top, mw, mh, sdc, sx, sy, sw, sh, SRCCOPY);
+                let ((dx, dy, dw, dh), (sx, sy, sw, sh)) = place(f, bm.bmWidth, bm.bmHeight, mw, mh);
+                StretchBlt(ddc, m.left + dx, m.top + dy, dw, dh, sdc, sx, sy, sw, sh, SRCCOPY);
             }
             SelectObject(sdc, o1); SelectObject(ddc, o2);
             DeleteDC(sdc); DeleteDC(ddc); ReleaseDC(std::ptr::null_mut(), screen); DeleteObject(src);
@@ -857,6 +940,15 @@ mod wall {
             assert_eq!(super::fill_src(1920, 1080, 1080, 1080), (420, 0, 1080, 1080)); // square screen: the sides go
             assert_eq!(super::fill_src(1920, 1080, 2560, 1080), (0, 135, 1920, 810)); // ultrawide: top and bottom go
             assert_eq!(super::fill_src(100, 100, 0, 0).2, 100); // no division by zero
+        }
+
+        #[test]
+        fn fit_center_and_stretch_place_the_picture() {
+            use super::{Fit, place};
+            assert_eq!(place(Fit::Fit, 1920, 1080, 1080, 1080).0, (0, 236, 1080, 607)); // bars above and below
+            assert_eq!(place(Fit::Stretch, 800, 600, 1920, 1080), ((0, 0, 1920, 1080), (0, 0, 800, 600)));
+            assert_eq!(place(Fit::Center, 800, 600, 1920, 1080), ((560, 240, 800, 600), (0, 0, 800, 600)));
+            assert_eq!(place(Fit::Center, 3000, 2000, 1920, 1080), ((0, 0, 1920, 1080), (540, 460, 1920, 1080)));
         }
     }
 
@@ -1246,6 +1338,14 @@ mod desk {
         }
     }
 
+    /// WorkerW paints the picture wallpaper too when no live wallpaper is in it: a new picture must show there as well.
+    pub fn redraw_workerw() {
+        let ww = WORKERW.get() as HWND;
+        if !ww.is_null() && unsafe { IsWindow(ww) } != 0 {
+            unsafe { InvalidateRect(ww, ptr::null(), 1) };
+        }
+    }
+
     pub fn pos_file() -> PathBuf {
         PathBuf::from(env::var_os("APPDATA").unwrap_or_default()).join(r"rust-explorer\desktop-icons.txt")
     }
@@ -1609,6 +1709,8 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
                     InvalidateRect(h, ptr::null(), 1);
                 } else if wp == SPI_SETWORKAREA as usize {
                     place_desk_list(ST.with_borrow(|st| st.list));
+                } else if wp == SPI_SETDESKWALLPAPER as usize {
+                    refresh_wall_if_changed(h);
                 }
                 0
             }
@@ -1870,7 +1972,11 @@ unsafe extern "system" fn proc(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESU
             // a secondary monitor, where the list does not reach (#125)
             WM_CONTEXTMENU if desk() && (icons_hidden() || wp as HWND == h) => { bg_menu(h); 0 }
             desk::SPAWN_WORKERW if desk() => { desk::spawn_workerw(h); 0 }
-            WM_TIMER if desk() && wp == 7 => { desk::check_live(ST.with_borrow(|st| st.list)); 0 }
+            WM_TIMER if desk() && wp == 7 => {
+                desk::check_live(ST.with_borrow(|st| st.list));
+                refresh_wall_if_changed(h); // a change that sent no WM_SETTINGCHANGE (Explorer's slideshow, Spotlight, a script)
+                0
+            }
             WM_DESTROY => { if !desk() { save_place(h); } shellwin::revoke(); PostQuitMessage(0); 0 }
             _ => DefWindowProcW(h, m, wp, lp),
         }

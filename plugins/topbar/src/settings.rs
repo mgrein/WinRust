@@ -48,6 +48,7 @@ pub(crate) fn style_name(s: i18n::style::Style) -> &'static str {
         Ruby => t!("Рубин", "Ruby", ja: "ルビー", pt: "Rubi", zh: "红宝石"),
         Win98 => "Windows 98",
         Win7 => "Windows 7",
+        Win11 => "Windows 11",
     }
 }
 
@@ -60,6 +61,7 @@ pub(crate) unsafe fn relook(moved: bool) {
     }
     apply_opacity(bar);
     InvalidateRect(bar, null(), 0);
+    crate::second::sync(); // the second monitors' bars follow the new size, side and style
 }
 
 /// The language of every WinRust program (written to lang.txt; the others pick it up when they start).
